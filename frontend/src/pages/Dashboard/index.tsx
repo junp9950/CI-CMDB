@@ -42,7 +42,7 @@ export default function Dashboard() {
       await api.post("/resources/sync");
       await load();
     } catch (e: any) {
-      if (e.response?.status === 401) { logout(); setShowLogin(true); setPendingAction("resource"); }
+      if (e.response?.status === 401 || e.response?.status === 403) { logout(); setShowLogin(true); setPendingAction("resource"); }
     }
     setSyncing(false);
   };
@@ -54,7 +54,7 @@ export default function Dashboard() {
       setLastSync(`${r.data.imported}건 가져옴`);
       await load();
     } catch (e: any) {
-      if (e.response?.status === 401) { logout(); setShowLogin(true); setPendingAction("activity"); }
+      if (e.response?.status === 401 || e.response?.status === 403) { logout(); setShowLogin(true); setPendingAction("activity"); }
       else setLastSync("오류 발생");
     }
     setSyncingLog(false);
@@ -74,7 +74,10 @@ export default function Dashboard() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
         <h2 style={{ margin: 0 }}>대시보드</h2>
         <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-          {lastSync && <span style={{ fontSize: 12, color: "#718096", paddingTop: 10 }}>{lastSync}</span>}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", paddingTop: 6, gap: 2 }}>
+            {stats.last_synced_at && <span style={{ fontSize: 11, color: "#a0aec0" }}>마지막 동기화: {toKST(stats.last_synced_at)}</span>}
+            {lastSync && <span style={{ fontSize: 12, color: "#718096" }}>{lastSync}</span>}
+          </div>
 
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
             <button

@@ -14,11 +14,14 @@ SKIP_PROVIDERS = {
     "microsoft.insights",
     "microsoft.security",
     "microsoft.advisor",
+    "microsoft.support",        # 지원 티켓, 인프라 변경 아님
 }
 
 # provider는 통과하지만 특정 리소스 타입은 제외
 SKIP_RESOURCE_TYPES = {
-    "microsoft.compute/locations",  # VM 사이즈 추천용 내부 진단, 사용자 변경 아님
+    "microsoft.compute/locations",
+    "microsoft.network/locations",
+    "microsoft.web/locations",
 }
 
 # Azure operation name → Korean description
@@ -236,14 +239,18 @@ def fetch_activity_logs(hours: int = 24) -> list[dict]:
         resource_type_tmp = _resource_type_from_id(resource_id_tmp)
         if resource_type_tmp in SKIP_RESOURCE_TYPES:
             continue
+        if resource_type_tmp.endswith("/locations") or resource_type_tmp == "locations":
+            continue
 
         # 리소스를 변경하지 않는 Policy 감사 작업 제외
         op_lower = op_name.lower()
         if "/audit/action" in op_lower or "/auditifnotexists/action" in op_lower:
             continue
 
-        # Azure Advisor가 실행한 자동화 이벤트 제외
+        # caller가 없는 Azure 내부 시스템 이벤트 제외
         caller = event.caller or ""
+        if not caller:
+            continue
         if caller.lower() == "microsoft.advisor":
             continue
 

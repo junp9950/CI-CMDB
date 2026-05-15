@@ -12,8 +12,10 @@ class ResourceBase(BaseModel):
     sku: Optional[Any] = None
     tags: Optional[dict] = {}
     has_public_ip: bool = False
+    public_ip_address: Optional[str] = None
     has_private_endpoint: bool = False
     has_nsg: bool = False
+    properties: Optional[Any] = None
 
 
 class ResourceCreate(ResourceBase):

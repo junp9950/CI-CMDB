@@ -1,8 +1,27 @@
+from datetime import datetime, timezone
+from pathlib import Path
 from sqlalchemy.orm import Session
 from app.collectors.activity_log import fetch_activity_logs
 from app.repositories.change_event_repo import ChangeEventRepository
 from app.services.snapshot_service import SnapshotService
 from app.engines import risk_engine
+
+_SYNC_TIME_FILE = Path(__file__).parent.parent.parent / "data" / "last_sync.txt"
+
+
+def get_last_synced_at() -> str | None:
+    try:
+        return _SYNC_TIME_FILE.read_text().strip() or None
+    except Exception:
+        return None
+
+
+def _save_last_synced_at():
+    try:
+        _SYNC_TIME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SYNC_TIME_FILE.write_text(datetime.now(timezone.utc).isoformat())
+    except Exception:
+        pass
 
 
 class ActivityLogService:
@@ -19,7 +38,6 @@ class ActivityLogService:
                 skipped += 1
                 continue
 
-            # 리소스 상태 스냅샷 비교로 before/after diff 생성
             resource_id = log.get("resource_id")
             state_changes = []
             if resource_id and log["operation"] in ("Update", "Create"):
@@ -37,6 +55,7 @@ class ActivityLogService:
                 log["before_state"],
                 log["after_state"],
                 diff,
+                log.get("resource_type", ""),
             )
             self.change_repo.create({
                 **log,
@@ -47,4 +66,5 @@ class ActivityLogService:
             })
             imported += 1
 
+        _save_last_synced_at()
         return {"imported": imported, "skipped": skipped, "hours": hours}

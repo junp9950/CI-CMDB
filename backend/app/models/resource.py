@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, DateTime, JSON
+from sqlalchemy import Column, String, Boolean, DateTime, JSON, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from app.core.database import Base
@@ -16,6 +16,8 @@ class Resource(Base):
     sku = Column(JSON, nullable=True)
     tags = Column(JSON, nullable=True, default={})
     has_public_ip = Column(Boolean, default=False)
+    public_ip_address = Column(String, nullable=True)
+    properties = Column(JSON, nullable=True)
     has_private_endpoint = Column(Boolean, default=False)
     has_nsg = Column(Boolean, default=False)
     collected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

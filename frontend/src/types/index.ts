@@ -8,8 +8,10 @@ export interface Resource {
   sku: any;
   tags: Record<string, string>;
   has_public_ip: boolean;
+  public_ip_address: string | null;
   has_private_endpoint: boolean;
   has_nsg: boolean;
+  properties: any;
   collected_at: string;
 }
 
@@ -44,6 +46,7 @@ export interface DashboardStats {
   resources_by_type: Record<string, number>;
   total_changes: number;
   changes_by_risk: Record<string, number>;
+  last_synced_at: string | null;
   recent_changes: {
     id: string;
     resource_name: string;

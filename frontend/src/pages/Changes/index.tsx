@@ -58,6 +58,8 @@ function buildGroups(events: ChangeEvent[]): EventGroup[] {
 export default function Changes() {
   const [events, setEvents] = useState<ChangeEvent[]>([]);
   const [search, setSearch] = useState("");
+  const [changedBySearch, setChangedBySearch] = useState("");
+  const [typeSearch, setTypeSearch] = useState("");
   const [opFilter, setOpFilter] = useState("");
   const [riskFilter, setRiskFilter] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -78,12 +80,17 @@ export default function Changes() {
     api.get<ChangeEvent[]>("/changes", { params }).then((r) => setEvents(r.data));
   }, [opFilter, riskFilter, dateFrom, dateTo]);
 
-  const filtered = useMemo(() =>
-    search.trim()
-      ? events.filter((e) => e.resource_name.toLowerCase().includes(search.toLowerCase()))
-      : events,
-    [events, search]
-  );
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const by = changedBySearch.trim().toLowerCase();
+    const tp = typeSearch.trim().toLowerCase();
+    return events.filter((e) => {
+      if (q && !e.resource_name.toLowerCase().includes(q)) return false;
+      if (by && !(e.changed_by ?? "").toLowerCase().includes(by)) return false;
+      if (tp && !e.resource_type.toLowerCase().includes(tp)) return false;
+      return true;
+    });
+  }, [events, search, changedBySearch, typeSearch]);
 
   const groups = useMemo(() => buildGroups(filtered), [filtered]);
 
@@ -128,52 +135,91 @@ export default function Changes() {
 
   const totalCount = groups.reduce((s, g) => s + 1 + g.children.length, 0);
 
+  const exportCSV = () => {
+    const rows = [["리소스 이름", "유형", "작업", "변경자", "위험도", "일시 (KST)"]];
+    for (const g of groups) {
+      const all = [g.main, ...g.children];
+      for (const e of all) {
+        rows.push([
+          e.resource_name,
+          e.resource_type,
+          e.operation,
+          e.changed_by ?? "-",
+          e.risk_level,
+          toKST(e.changed_at),
+        ]);
+      }
+    }
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `변경이력_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div>
       <h2 style={{ marginBottom: 20 }}>CMDB — 변경 이력</h2>
 
-      <div style={{ display: "flex", gap: 10, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="리소스 이름 검색"
-          style={{ ...inputStyle, width: 200 }}
-        />
-        <select value={opFilter} onChange={(e) => setOpFilter(e.target.value)} style={selectStyle}>
-          <option value="">전체 작업</option>
-          <option value="Create">Create</option>
-          <option value="Update">Update</option>
-          <option value="Delete">Delete</option>
-        </select>
-        <select value={riskFilter} onChange={(e) => setRiskFilter(e.target.value)} style={selectStyle}>
-          <option value="">전체 위험도</option>
-          <option value="High">High</option>
-          <option value="Medium">Medium</option>
-          <option value="Low">Low</option>
-          <option value="None">None</option>
-        </select>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={inputStyle} />
-          <span style={{ color: "#a0aec0", fontSize: 14 }}>~</span>
-          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={inputStyle} />
-          {(dateFrom || dateTo) && (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="리소스 이름" style={{ ...inputStyle, width: 160 }} />
+          <input value={typeSearch} onChange={(e) => setTypeSearch(e.target.value)} placeholder="유형" style={{ ...inputStyle, width: 140 }} />
+          <input value={changedBySearch} onChange={(e) => setChangedBySearch(e.target.value)} placeholder="변경자" style={{ ...inputStyle, width: 140 }} />
+          <select value={opFilter} onChange={(e) => setOpFilter(e.target.value)} style={selectStyle}>
+            <option value="">전체 작업</option>
+            <option value="Create">Create</option>
+            <option value="Update">Update</option>
+            <option value="Delete">Delete</option>
+          </select>
+          <select value={riskFilter} onChange={(e) => setRiskFilter(e.target.value)} style={selectStyle}>
+            <option value="">전체 위험도</option>
+            <option value="High">High</option>
+            <option value="Medium">Medium</option>
+            <option value="Low">Low</option>
+            <option value="None">None</option>
+          </select>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={inputStyle} />
+            <span style={{ color: "#a0aec0", fontSize: 14 }}>~</span>
+            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={inputStyle} />
+          </div>
+          {(search || typeSearch || changedBySearch || dateFrom || dateTo || opFilter || riskFilter) && (
             <button
-              onClick={() => { setDateFrom(""); setDateTo(""); }}
+              onClick={() => { setSearch(""); setTypeSearch(""); setChangedBySearch(""); setDateFrom(""); setDateTo(""); setOpFilter(""); setRiskFilter(""); }}
               style={{ background: "none", border: "1px solid #e2e8f0", borderRadius: 6, padding: "7px 10px", cursor: "pointer", fontSize: 13, color: "#718096" }}
             >
-              초기화
+              전체 초기화
             </button>
           )}
+          <span style={{ fontSize: 13, color: "#a0aec0", marginLeft: 4 }}>{totalCount}건 ({groups.length}그룹)</span>
+          <button
+            onClick={exportCSV}
+            style={{ marginLeft: "auto", background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, padding: "7px 14px", cursor: "pointer", fontSize: 13, color: "#4a5568" }}
+          >
+            CSV 내보내기
+          </button>
         </div>
-        <span style={{ fontSize: 13, color: "#a0aec0" }}>{totalCount}건 ({groups.length}그룹)</span>
       </div>
 
       <div style={{ display: "flex", gap: 0 }}>
-        <div style={{ flex: 1, minWidth: 0, marginRight: selected ? panelWidth + 16 : 0, background: "#fff", borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <div style={{ flex: 1, minWidth: 0, marginRight: selected ? panelWidth + 16 : 0, background: "#fff", borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 220px)" }}>
+          <table style={{ width: "100%", minWidth: 860, borderCollapse: "collapse", fontSize: 13 }}>
+            <colgroup>
+              <col style={{ width: 40 }} />
+              <col />
+              <col style={{ width: 140 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 150 }} />
+            </colgroup>
             <thead>
               <tr style={{ background: "#f7fafc", borderBottom: "1px solid #e2e8f0" }}>
-                <th style={{ width: 32 }} />
+                <th style={{ width: 40 }} />
                 {["리소스 이름", "유형", "작업", "변경자", "위험도", "일시 (KST)"].map((h) => (
                   <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#4a5568", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
@@ -207,7 +253,7 @@ export default function Changes() {
                     </td>
                     <td style={{ padding: "10px 16px", color: "#718096", fontSize: 12 }} title={g.main.resource_type}>{shortType(g.main.resource_type)}</td>
                     <td style={{ padding: "10px 16px" }}>{g.main.operation}</td>
-                    <td style={{ padding: "10px 16px", color: "#718096" }}>{g.main.changed_by ?? "-"}</td>
+                    <td style={{ padding: "10px 16px", color: "#718096", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={g.main.changed_by ?? "-"}>{shortUser(g.main.changed_by)}</td>
                     <td style={{ padding: "10px 16px" }}><RiskBadge level={g.main.risk_level} /></td>
                     <td style={{ padding: "10px 16px", color: "#718096", whiteSpace: "nowrap" }}>{toKST(g.main.changed_at)}</td>
                   </tr>
@@ -226,7 +272,7 @@ export default function Changes() {
                       </td>
                       <td style={{ padding: "8px 16px", color: "#718096", fontSize: 12 }} title={child.resource_type}>{shortType(child.resource_type)}</td>
                       <td style={{ padding: "8px 16px", color: "#718096" }}>{child.operation}</td>
-                      <td style={{ padding: "8px 16px", color: "#718096" }}>{child.changed_by ?? "-"}</td>
+                      <td style={{ padding: "8px 16px", color: "#718096", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={child.changed_by ?? "-"}>{shortUser(child.changed_by)}</td>
                       <td style={{ padding: "8px 16px" }}><RiskBadge level={child.risk_level} /></td>
                       <td style={{ padding: "8px 16px", color: "#718096", whiteSpace: "nowrap" }}>{toKST(child.changed_at)}</td>
                     </tr>
@@ -312,6 +358,11 @@ export default function Changes() {
 
 function shortType(type: string) {
   return type.split("/").pop() ?? type;
+}
+
+function shortUser(user: string | null | undefined) {
+  if (!user) return "-";
+  return user.includes("@") ? user.split("@")[0] : user;
 }
 
 function Field({ label, value }: { label: string; value: any }) {

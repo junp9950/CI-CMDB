@@ -45,6 +45,10 @@ class ChangeEventRepository:
             event.notification_sent = True
             self.db.commit()
 
+    def latest_synced_at(self):
+        from sqlalchemy import func
+        return self.db.query(func.max(ChangeEvent.changed_at)).scalar()
+
     def count(self) -> int:
         return self.db.query(ChangeEvent).count()
 

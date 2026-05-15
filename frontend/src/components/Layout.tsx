@@ -5,6 +5,7 @@ const NAV_ITEMS = [
   { to: "/", label: "대시보드" },
   { to: "/resources", label: "CIDB (리소스)" },
   { to: "/changes", label: "CMDB (변경 이력)" },
+  { to: "/network", label: "네트워크 분석" },
   { to: "/settings", label: "알림 설정" },
 ];
 

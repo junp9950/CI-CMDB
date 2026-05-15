@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from app.repositories.resource_repo import ResourceRepository
 from app.repositories.change_event_repo import ChangeEventRepository
+from app.services.activity_log_service import get_last_synced_at
 
 
 class DashboardService:
@@ -14,6 +15,7 @@ class DashboardService:
             "resources_by_type": self.resource_repo.count_by_type(),
             "total_changes": self.change_repo.count(),
             "changes_by_risk": self.change_repo.count_by_risk(),
+            "last_synced_at": get_last_synced_at(),
             "recent_changes": [
                 {
                     "id": e.id,
