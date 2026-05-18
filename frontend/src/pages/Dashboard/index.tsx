@@ -77,6 +77,10 @@ export default function Dashboard() {
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", paddingTop: 6, gap: 2 }}>
             {stats.last_synced_at && <span style={{ fontSize: 11, color: "#a0aec0" }}>마지막 동기화: {toKST(stats.last_synced_at)}</span>}
             {lastSync && <span style={{ fontSize: 12, color: "#718096" }}>{lastSync}</span>}
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: isAdmin ? "#68d391" : "#fc8181" }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: isAdmin ? "#68d391" : "#fc8181", display: "inline-block" }} />
+              {isAdmin ? "Admin 로그인 중" : "비로그인"}
+            </span>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>

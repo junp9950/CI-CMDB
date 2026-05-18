@@ -20,6 +20,7 @@ export function useAdmin() {
       const r = await api.post("/auth/login", { password });
       const t = r.data.token;
       localStorage.setItem(TOKEN_KEY, t);
+      api.defaults.headers.common["Authorization"] = `Bearer ${t}`;
       setToken(t);
       return true;
     } catch {

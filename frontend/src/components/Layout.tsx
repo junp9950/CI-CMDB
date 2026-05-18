@@ -1,5 +1,6 @@
 import React from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { useAdmin } from "../hooks/useAdmin";
 
 const NAV_ITEMS = [
   { to: "/", label: "대시보드" },
@@ -19,9 +20,11 @@ const RISK_COLOR: Record<string, string> = {
 export { RISK_COLOR };
 
 export default function Layout() {
+  const { isAdmin, logout } = useAdmin();
+
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: "sans-serif" }}>
-      <nav style={{ width: 200, background: "#1a202c", color: "#fff", padding: "24px 0" }}>
+      <nav style={{ width: 200, background: "#1a202c", color: "#fff", padding: "24px 0", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "0 20px 24px", fontWeight: 700, fontSize: 16 }}>
           Azure CIDB/CMDB
         </div>
@@ -42,6 +45,7 @@ export default function Layout() {
             {item.label}
           </NavLink>
         ))}
+
       </nav>
       <main style={{ flex: 1, padding: 32, background: "#f7fafc", overflowY: "auto" }}>
         <Outlet />

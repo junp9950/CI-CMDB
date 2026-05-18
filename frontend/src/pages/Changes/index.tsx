@@ -5,9 +5,26 @@ import RiskBadge from "../../components/RiskBadge";
 import { toKST } from "../../utils/time";
 
 interface EventGroup {
-  key: string;           // correlationId 또는 단독 이벤트 id
-  main: ChangeEvent;     // 대표 이벤트
-  children: ChangeEvent[]; // 연관 이벤트 (대표 제외)
+  key: string;
+  main: ChangeEvent;
+  children: ChangeEvent[];
+  _originalMain?: ChangeEvent;
+}
+
+const BULK_THRESHOLD = 6; // 이 수 이상이면 대규모 배포로 간주
+
+function bulkLabel(group: ChangeEvent[]): string {
+  // 리소스 ID에서 리소스 그룹 추출
+  const rgSet = new Set<string>();
+  for (const e of group) {
+    if (e.resource_id) {
+      const m = e.resource_id.match(/resourceGroups\/([^/]+)/i);
+      if (m) rgSet.add(m[1]);
+    }
+  }
+  const rg = rgSet.size === 1 ? Array.from(rgSet)[0] : null;
+  const ops = Array.from(new Set(group.map((e) => e.operation))).join("/");
+  return rg ? `[배포] ${rg} (${ops} ${group.length}개)` : `[배포] ${ops} ${group.length}개`;
 }
 
 function buildGroups(events: ChangeEvent[]): EventGroup[] {
@@ -31,21 +48,27 @@ function buildGroups(events: ChangeEvent[]): EventGroup[] {
       singles.push(group[0]);
       continue;
     }
-    // 대표 이벤트: Delete > Create > Update 우선순위, 같으면 리소스 이름 짧은 것
+
     const priority = (op: string) => op === "Delete" ? 0 : op === "Create" ? 1 : 2;
     const sorted = [...group].sort((a, b) =>
       priority(a.operation) - priority(b.operation) ||
       a.resource_name.length - b.resource_name.length
     );
     const [main, ...children] = sorted;
-    groups.push({ key: corrId, main, children });
+
+    // 대규모 배포: 대표 이름을 리소스 그룹 기반으로 교체
+    const isBulk = group.length >= BULK_THRESHOLD;
+    const displayMain: ChangeEvent = isBulk
+      ? { ...main, resource_name: bulkLabel(group) }
+      : main;
+
+    groups.push({ key: corrId, main: displayMain, children, _originalMain: main });
   }
 
   for (const e of singles) {
     groups.push({ key: e.id, main: e, children: [] });
   }
 
-  // 최신순 정렬
   groups.sort((a, b) => {
     const ta = new Date(a.main.changed_at ?? 0).getTime();
     const tb = new Date(b.main.changed_at ?? 0).getTime();
@@ -230,17 +253,17 @@ export default function Changes() {
                 <React.Fragment key={g.key}>
                   {/* 대표 행 */}
                   <tr
-                    onClick={() => setSelected(g.main)}
-                    style={{ borderBottom: "1px solid #e2e8f0", cursor: "pointer", background: selected?.id === g.main.id ? "#ebf8ff" : "transparent" }}
+                    onClick={() => setSelected(g._originalMain ?? g.main)}
+                    style={{ borderBottom: "1px solid #e2e8f0", cursor: "pointer", background: selected?.id === (g._originalMain ?? g.main).id ? "#ebf8ff" : "transparent" }}
                   >
-                    <td style={{ padding: "10px 8px 10px 16px", width: 24 }}>
+                    <td
+                      style={{ padding: "10px 8px 10px 16px", width: 32, textAlign: "center" }}
+                      onClick={(ev) => { if (g.children.length > 0) { ev.stopPropagation(); toggleExpand(g.key); } }}
+                    >
                       {g.children.length > 0 && (
-                        <button
-                          onClick={(ev) => { ev.stopPropagation(); toggleExpand(g.key); }}
-                          style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 12, color: "#718096", lineHeight: 1 }}
-                        >
+                        <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "#edf2f7", cursor: "pointer", fontSize: 11, color: "#4a5568", userSelect: "none" }}>
                           {expanded.has(g.key) ? "▼" : "▶"}
-                        </button>
+                        </span>
                       )}
                     </td>
                     <td style={{ padding: "10px 16px", fontWeight: 600 }}>
