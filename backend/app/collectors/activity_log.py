@@ -24,6 +24,16 @@ SKIP_RESOURCE_TYPES = {
     "microsoft.web/locations",
 }
 
+# Azure 내부 자동 동작 action — 사용자 설정 변경 아님
+SKIP_OPERATIONS = {
+    "microsoft.network/firewallpolicies/updatereferences/action",
+    "microsoft.network/azurefirewalls/updatereferences/action",
+    "microsoft.network/virtualnetworks/updatereferences/action",
+    "microsoft.network/networksecuritygroups/updatereferences/action",
+    "microsoft.network/routetables/updatereferences/action",
+    "microsoft.compute/virtualmachines/updatereferences/action",
+}
+
 # Azure operation name → Korean description
 OPERATION_DESCRIPTIONS: dict[str, str] = {
     # Compute - VM
@@ -245,6 +255,13 @@ def fetch_activity_logs(hours: int = 24) -> list[dict]:
         # 리소스를 변경하지 않는 Policy 감사 작업 제외
         op_lower = op_name.lower()
         if "/audit/action" in op_lower or "/auditifnotexists/action" in op_lower:
+            continue
+
+        # Azure 내부 참조 동기화 action 제외 (사용자 변경 아님)
+        if op_lower in SKIP_OPERATIONS:
+            continue
+        # updatereferences 패턴 전체 제외 (리소스 종류 무관)
+        if "/updatereferences/" in op_lower:
             continue
 
         # caller가 없는 Azure 내부 시스템 이벤트 제외
