@@ -56,6 +56,8 @@ class AzureResourceGraphCollector(BaseCollector):
         vm_nic_info = self._fetch_vm_nic_info(client)
 
         results = []
+        fw_policy_rows = []
+
         for row in response.data:
             rtype = row["type"].lower()
             props = row.get("properties") or {}
@@ -87,7 +89,63 @@ class AzureResourceGraphCollector(BaseCollector):
                 "properties": props,
                 "collected_at": now,
             })
+
+            if rtype == "microsoft.network/firewallpolicies":
+                fw_policy_rows.append(row)
+
+        # Firewall Policy RuleCollectionGroups는 Resource Graph에서 인덱싱 안 됨 → REST API로 직접 수집
+        if fw_policy_rows:
+            rcg_resources = self._fetch_fw_policy_rcgs(credential, fw_policy_rows, now)
+            results.extend(rcg_resources)
+
         return results
+
+    def _fetch_fw_policy_rcgs(self, credential, policy_rows: list, now) -> list:
+        """Firewall Policy의 RuleCollectionGroups를 REST API로 직접 수집"""
+        import requests
+        try:
+            token = credential.get_token("https://management.azure.com/.default").token
+            headers = {"Authorization": f"Bearer {token}"}
+            rcg_results = []
+
+            for row in policy_rows:
+                rcg_refs = (row.get("properties") or {}).get("ruleCollectionGroups", [])
+                for ref in rcg_refs:
+                    rcg_id = ref.get("id", "")
+                    if not rcg_id:
+                        continue
+                    url = f"https://management.azure.com{rcg_id}?api-version=2023-05-01"
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    if resp.status_code != 200:
+                        continue
+                    rcg = resp.json()
+                    # resource_group 추출 (/resourceGroups/xxx/)
+                    parts = rcg_id.split("/")
+                    rg_idx = next((i for i, p in enumerate(parts) if p.lower() == "resourcegroups"), -1)
+                    rg = parts[rg_idx + 1] if rg_idx >= 0 and rg_idx + 1 < len(parts) else row["resourceGroup"]
+                    sub_id = next((parts[i+1] for i, p in enumerate(parts) if p.lower() == "subscriptions"), row["subscriptionId"])
+
+                    rcg_results.append({
+                        "id": rcg_id,
+                        "subscription_id": sub_id,
+                        "resource_group": rg,
+                        "name": rcg.get("name", ""),
+                        "type": "microsoft.network/firewallpolicies/rulecollectiongroups",
+                        "location": row.get("location", ""),
+                        "sku": None,
+                        "tags": {},
+                        "has_public_ip": False,
+                        "public_ip_address": None,
+                        "has_private_endpoint": False,
+                        "has_nsg": False,
+                        "properties": rcg.get("properties", {}),
+                        "collected_at": now,
+                    })
+            return rcg_results
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"FW Policy RCG 수집 실패: {e}")
+            return []
 
     def _fetch_vm_nic_info(self, client) -> dict:
         """VM ID → {has_public_ip, has_nsg} 매핑 반환"""

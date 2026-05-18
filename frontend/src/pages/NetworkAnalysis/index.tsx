@@ -127,6 +127,135 @@ function getNsgRules(nsg: Resource): NsgRule[] {
   });
 }
 
+// ── UDR helpers ─────────────────────────────────────────────────
+interface Route {
+  name: string;
+  addressPrefix: string;
+  nextHopType: string;
+  nextHopIpAddress?: string;
+}
+
+function cidrBits(cidr: string): number {
+  return cidr.includes("/") ? parseInt(cidr.split("/")[1], 10) : 32;
+}
+
+function bestRoute(routes: Route[], dstIp: string): Route | null {
+  // longest prefix match
+  const matched = routes.filter((r) => {
+    try { return inCidr(dstIp, r.addressPrefix); } catch { return false; }
+  });
+  if (!matched.length) return null;
+  return matched.reduce((a, b) => cidrBits(a.addressPrefix) >= cidrBits(b.addressPrefix) ? a : b);
+}
+
+function getRouteTable(subnetId: string, all: Resource[]): { rt: Resource; routes: Route[] } | null {
+  // subnet ID 로 VNet 찾고, subnet 속성에서 routeTable.id 조회
+  const vnet = all.find((r) =>
+    r.type === "microsoft.network/virtualnetworks" &&
+    (r.properties?.subnets || []).some((s: any) => s.id?.toLowerCase() === subnetId.toLowerCase())
+  );
+  if (!vnet) return null;
+  const subnet = (vnet.properties?.subnets || []).find(
+    (s: any) => s.id?.toLowerCase() === subnetId.toLowerCase()
+  );
+  const rtId = subnet?.properties?.routeTable?.id;
+  if (!rtId) return null;
+  const rt = all.find((r) => r.id.toLowerCase() === rtId.toLowerCase());
+  if (!rt) return null;
+  const routes: Route[] = (rt.properties?.routes || []).map((r: any) => {
+    const p = r.properties || r;
+    return { name: r.name || "", addressPrefix: p.addressPrefix || "0.0.0.0/0", nextHopType: p.nextHopType || "", nextHopIpAddress: p.nextHopIpAddress };
+  });
+  return { rt, routes };
+}
+
+function getVmSubnetId(vm: Resource, all: Resource[]): string | null {
+  const nicIds = (vm.properties?.networkProfile?.networkInterfaces || []).map((n: any) => n.id?.toLowerCase());
+  const nic = all.find((r) => nicIds.includes(r.id.toLowerCase()));
+  return nic?.properties?.ipConfigurations?.[0]?.properties?.subnet?.id ?? null;
+}
+
+// ── Firewall helpers ─────────────────────────────────────────────
+
+function evalFwRuleCollections(
+  collections: any[],
+  srcIp: string,
+  dstIp: string,
+  port: number,
+  proto: string,
+  isPolicy: boolean
+): { access: "Allow" | "Deny"; collectionName: string; ruleName: string } | null {
+  // priority 순 정렬 (낮을수록 먼저 평가)
+  const sorted = [...collections].sort(
+    (a, b) => (a.properties?.priority ?? a.priority ?? 0) - (b.properties?.priority ?? b.priority ?? 0)
+  );
+  for (const col of sorted) {
+    const cp = col.properties || col;
+    const action: string = cp.action?.type ?? "Deny";
+    const rules: any[] = cp.rules || [];
+    for (const rule of rules) {
+      // Policy 규칙은 ruleType 필터 (NetworkRule만), Classic은 없음
+      if (isPolicy && rule.ruleType && rule.ruleType !== "NetworkRule") continue;
+
+      const srcMatch = (rule.sourceAddresses || ["*"]).some((s: string) => matchAddress(s, srcIp));
+      const dstMatch = (rule.destinationAddresses || ["*"]).some((d: string) => matchAddress(d, dstIp));
+      const portMatch = (rule.destinationPorts || ["*"]).some((p: string) => matchPort(p, port));
+      // Policy는 ipProtocols, Classic은 protocols
+      const protocols: string[] = isPolicy
+        ? (rule.ipProtocols || ["Any"])
+        : (rule.protocols || ["Any"]);
+      const protoMatch = protocols.some((p: string) => p === "Any" || matchProtocol(p, proto));
+
+      if (srcMatch && dstMatch && portMatch && protoMatch) {
+        return { access: action as "Allow" | "Deny", collectionName: col.name || "", ruleName: rule.name || "" };
+      }
+    }
+  }
+  return null;
+}
+
+function evaluateFirewall(
+  fw: Resource,
+  srcIp: string,
+  dstIp: string,
+  port: number,
+  proto: string,
+  all: Resource[]
+): { access: "Allow" | "Deny"; collectionName: string; ruleName: string } | null {
+  const props = fw.properties || {};
+
+  // ── Firewall Policy 방식 ──
+  const policyId: string = props.firewallPolicy?.id || "";
+  if (policyId) {
+    // policy → rulecollectiongroups 찾기
+    const rcgs = all.filter((r) =>
+      r.type === "microsoft.network/firewallpolicies/rulecollectiongroups" &&
+      r.id.toLowerCase().startsWith(policyId.toLowerCase() + "/")
+    );
+    // rcg priority 순 정렬 후, 각 rcg 내 ruleCollections 평가
+    const sortedRcgs = [...rcgs].sort(
+      (a, b) => (a.properties?.priority ?? 0) - (b.properties?.priority ?? 0)
+    );
+    for (const rcg of sortedRcgs) {
+      const ruleCollections: any[] = rcg.properties?.ruleCollections || [];
+      // network rule collection만 (type filter)
+      const netCols = ruleCollections.filter(
+        (c: any) => !c.ruleCollectionType || c.ruleCollectionType === "FirewallPolicyFilterRuleCollection"
+      );
+      const result = evalFwRuleCollections(netCols, srcIp, dstIp, port, proto, true);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  // ── Classic 인라인 방식 ──
+  const collections: any[] = props.networkRuleCollections || [];
+  return evalFwRuleCollections(
+    collections.map((c: any) => ({ ...c, properties: c.properties || c })),
+    srcIp, dstIp, port, proto, false
+  );
+}
+
 // ── main analysis ────────────────────────────────────────────────
 function analyze(
   srcVm: Resource | null,
@@ -140,7 +269,6 @@ function analyze(
   const hops: HopResult[] = [];
   const byId = (id: string) => all.find((r) => r.id.toLowerCase() === id.toLowerCase());
 
-  // helper: get NSG resources attached to a VM via its NICs
   function getVmNsgs(vm: Resource): { nsg: Resource; nic: Resource }[] {
     const props = vm.properties || {};
     const nicIds: string[] = (props.networkProfile?.networkInterfaces || []).map((n: any) =>
@@ -186,6 +314,62 @@ function analyze(
     }
   }
 
+  // ── UDR (Route Table) check ──
+  if (srcVm) {
+    const subnetId = getVmSubnetId(srcVm, all);
+    if (subnetId) {
+      const rtInfo = getRouteTable(subnetId, all);
+      if (rtInfo) {
+        const { rt, routes } = rtInfo;
+        const route = bestRoute(routes, dstIp);
+        if (route) {
+          const hopType = route.nextHopType;
+          const blocked = hopType === "None";
+          hops.push({
+            layer: "UDR (경로 테이블)",
+            resource: rt.name,
+            direction: "Outbound",
+            result: blocked ? "Deny" : "Allow",
+            note: `경로: ${route.addressPrefix} → ${hopType}${route.nextHopIpAddress ? ` (${route.nextHopIpAddress})` : ""}`,
+          });
+
+          // ── Azure Firewall check (UDR이 VirtualAppliance로 라우팅 시) ──
+          if (!blocked && hopType === "VirtualAppliance" && route.nextHopIpAddress) {
+            const fw = all.find((r) => r.type === "microsoft.network/azurefirewalls");
+            if (fw) {
+              const fwMatch = evaluateFirewall(fw, srcIp, dstIp, port, proto, all);
+              hops.push({
+                layer: "Azure Firewall",
+                resource: fw.name,
+                direction: "Outbound",
+                result: fwMatch ? fwMatch.access : "Allow",
+                note: fwMatch
+                  ? `규칙: ${fwMatch.collectionName} / ${fwMatch.ruleName}`
+                  : "매칭 규칙 없음 — 기본 거부 (Firewall 기본 정책)",
+              });
+            } else {
+              hops.push({
+                layer: "Azure Firewall",
+                resource: `NVA (${route.nextHopIpAddress})`,
+                direction: "Outbound",
+                result: "Allow",
+                note: "Azure Firewall 리소스 없음 — NVA 또는 다른 어플라이언스 경유 (규칙 미확인)",
+              });
+            }
+          }
+        } else {
+          hops.push({
+            layer: "UDR (경로 테이블)",
+            resource: rt.name,
+            direction: "Outbound",
+            result: "Allow",
+            note: "매칭 경로 없음 — 시스템 기본 경로 사용",
+          });
+        }
+      }
+    }
+  }
+
   // ── destination inbound NSG check ──
   if (dstVm) {
     const dstNsgs = getVmNsgs(dstVm);
@@ -222,13 +406,24 @@ function analyze(
     : `❌ ${srcIp} → ${dstIp}:${port} 트래픽이 차단됩니다.`;
 
   let fix: string | undefined;
-  if (blocked && blocked.matchedRule) {
+  if (blocked && blocked.layer === "Azure Firewall") {
+    const note = blocked.note || "";
+    fix = `Azure Firewall "${blocked.resource}"에서 차단 중입니다.\n` +
+      (note ? `차단 규칙: ${note}\n` : "") +
+      `→ 아래 중 하나를 선택하세요:\n` +
+      `   1) 차단 규칙 컬렉션을 삭제하거나 해당 규칙을 제거\n` +
+      `   2) 우선순위가 더 높은(숫자 작은) Allow 컬렉션을 추가\n` +
+      `      예) 우선순위: 100, 액션: Allow, 프로토콜: ${proto.toUpperCase()}, 소스: <web서브넷>, 대상: <app서브넷>:${port}`;
+  } else if (blocked && blocked.layer === "UDR (경로 테이블)") {
+    fix = `Route Table "${blocked.resource}"에 nextHopType: None 경로가 있어 트래픽이 차단됩니다.\n` +
+      `→ 해당 경로의 nextHopType을 VnetLocal 또는 VirtualAppliance로 변경하세요.`;
+  } else if (blocked && blocked.matchedRule) {
     const r = blocked.matchedRule;
     fix = `NSG "${blocked.resource.split(" (")[0]}"의 규칙 "${r.name}" (우선순위 ${r.priority}, ${r.access})이 차단 중입니다.\n` +
       `→ 해당 규칙을 삭제하거나, 우선순위가 더 높은(숫자 작은) Allow 규칙을 추가하세요.\n` +
       `   예) 우선순위: ${r.priority - 10}, 방향: ${r.direction}, 허용 프로토콜: ${proto.toUpperCase()}, 대상 포트: ${port}`;
   } else if (blocked) {
-    fix = `NSG에 허용 규칙을 추가하세요.\n방향: ${blocked.direction}, 프로토콜: ${proto.toUpperCase()}, 대상 포트: ${port}`;
+    fix = `"${blocked.layer}"에서 차단됩니다.\n방향: ${blocked.direction}, 프로토콜: ${proto.toUpperCase()}, 대상 포트: ${port}`;
   }
 
   return { reachable, hops, summary, fix };
@@ -291,7 +486,7 @@ export default function NetworkAnalysis() {
     <div>
       <h2 style={{ marginBottom: 4 }}>네트워크 경로 분석</h2>
       <p style={{ color: "#718096", fontSize: 13, marginBottom: 24 }}>
-        NSG 규칙 기반 트래픽 허용/차단 분석 · 향후 FW / UDR 레이어 추가 예정
+        NSG · UDR (Route Table) · Azure Firewall 레이어 기반 트래픽 허용/차단 분석
       </p>
 
       <div style={{ background: "#fff", borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", padding: 24, marginBottom: 24 }}>
