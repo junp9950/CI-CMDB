@@ -14,7 +14,6 @@ interface EventGroup {
 const BULK_THRESHOLD = 6; // 이 수 이상이면 대규모 배포로 간주
 
 function bulkLabel(group: ChangeEvent[]): string {
-  // 리소스 ID에서 리소스 그룹 추출
   const rgSet = new Set<string>();
   for (const e of group) {
     if (e.resource_id) {
@@ -23,8 +22,12 @@ function bulkLabel(group: ChangeEvent[]): string {
     }
   }
   const rg = rgSet.size === 1 ? Array.from(rgSet)[0] : null;
-  const ops = Array.from(new Set(group.map((e) => e.operation))).join("/");
-  return rg ? `[배포] ${rg} (${ops} ${group.length}개)` : `[배포] ${ops} ${group.length}개`;
+  const ops = new Set(group.map((e) => e.operation));
+  const tag = ops.has("Delete") && !ops.has("Create") ? "삭제"
+    : ops.has("Create") && !ops.has("Delete") ? "생성"
+    : "변경";
+  const opsStr = Array.from(ops).join("/");
+  return rg ? `[${tag}] ${rg} (${opsStr} ${group.length}개)` : `[${tag}] ${opsStr} ${group.length}개`;
 }
 
 function buildGroups(events: ChangeEvent[]): EventGroup[] {
