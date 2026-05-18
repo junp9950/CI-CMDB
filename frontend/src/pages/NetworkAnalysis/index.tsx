@@ -175,6 +175,20 @@ function getVmSubnetId(vm: Resource, all: Resource[]): string | null {
   return nic?.properties?.ipConfigurations?.[0]?.properties?.subnet?.id ?? null;
 }
 
+function getSubnetNsg(subnetId: string, all: Resource[]): Resource | null {
+  const vnet = all.find((r) =>
+    r.type === "microsoft.network/virtualnetworks" &&
+    (r.properties?.subnets || []).some((s: any) => s.id?.toLowerCase() === subnetId.toLowerCase())
+  );
+  if (!vnet) return null;
+  const subnet = (vnet.properties?.subnets || []).find(
+    (s: any) => s.id?.toLowerCase() === subnetId.toLowerCase()
+  );
+  const nsgId = subnet?.properties?.networkSecurityGroup?.id;
+  if (!nsgId) return null;
+  return all.find((r) => r.id.toLowerCase() === nsgId.toLowerCase()) || null;
+}
+
 // ── Firewall helpers ─────────────────────────────────────────────
 
 function evalFwRuleCollections(
@@ -269,47 +283,57 @@ function analyze(
   const hops: HopResult[] = [];
   const byId = (id: string) => all.find((r) => r.id.toLowerCase() === id.toLowerCase());
 
-  function getVmNsgs(vm: Resource): { nsg: Resource; nic: Resource }[] {
-    const props = vm.properties || {};
-    const nicIds: string[] = (props.networkProfile?.networkInterfaces || []).map((n: any) =>
+  function getNicNsg(vm: Resource): { nsg: Resource; nic: Resource } | null {
+    const nicIds: string[] = (vm.properties?.networkProfile?.networkInterfaces || []).map((n: any) =>
       (n.id || "").toLowerCase()
     );
     const nics = all.filter((r) => nicIds.includes(r.id.toLowerCase()));
-    const result: { nsg: Resource; nic: Resource }[] = [];
     for (const nic of nics) {
       const nsgId = nic.properties?.networkSecurityGroup?.id;
       if (nsgId) {
         const nsg = byId(nsgId);
-        if (nsg) result.push({ nsg, nic });
+        if (nsg) return { nsg, nic };
       }
     }
+    return null;
+  }
+
+  function pushNsgHop(
+    label: string,
+    resource: string,
+    direction: "Inbound" | "Outbound",
+    nsg: Resource
+  ): "Deny" | "Allow" | "NoNSG" {
+    const rules = getNsgRules(nsg);
+    const match = evaluateNsg(rules, direction, srcIp, dstIp, port, proto);
+    const result = match ? match.access : "Allow";
+    hops.push({
+      layer: label,
+      resource,
+      direction,
+      result,
+      matchedRule: match?.rule,
+      note: match ? undefined : "매칭 규칙 없음 — 기본 허용",
+    });
     return result;
   }
 
-  // ── source outbound NSG check ──
+  // ── source outbound: NIC NSG → 서브넷 NSG (Azure 평가 순서) ──
   if (srcVm) {
-    const srcNsgs = getVmNsgs(srcVm);
-    if (srcNsgs.length === 0) {
-      hops.push({
-        layer: "NSG (송신측)",
-        resource: `${srcVm.name} — NSG 없음`,
-        direction: "Outbound",
-        result: "NoNSG",
-        note: "NSG가 연결되지 않아 기본 Azure 정책 적용",
-      });
+    const srcSubnetId = getVmSubnetId(srcVm, all);
+    const nicNsg = getNicNsg(srcVm);
+    const subnetNsg = srcSubnetId ? getSubnetNsg(srcSubnetId, all) : null;
+
+    if (!nicNsg && !subnetNsg) {
+      hops.push({ layer: "NSG (송신측 NIC)", resource: `${srcVm.name} — NSG 없음`, direction: "Outbound", result: "NoNSG", note: "NIC/서브넷 모두 NSG 없음" });
     } else {
-      for (const { nsg, nic } of srcNsgs) {
-        const rules = getNsgRules(nsg);
-        const match = evaluateNsg(rules, "Outbound", srcIp, dstIp, port, proto);
-        hops.push({
-          layer: "NSG (송신측)",
-          resource: `${nsg.name} (NIC: ${nic.name})`,
-          direction: "Outbound",
-          result: match ? match.access : "Allow",
-          matchedRule: match?.rule,
-          note: match ? undefined : "매칭 규칙 없음 — 기본 허용",
-        });
-        if (match?.access === "Deny") break;
+      let srcDenied = false;
+      if (nicNsg) {
+        const r = pushNsgHop("NSG (송신측 NIC)", `${nicNsg.nsg.name} (NIC: ${nicNsg.nic.name})`, "Outbound", nicNsg.nsg);
+        if (r === "Deny") srcDenied = true;
+      }
+      if (!srcDenied && subnetNsg) {
+        pushNsgHop("NSG (송신측 서브넷)", subnetNsg.name, "Outbound", subnetNsg);
       }
     }
   }
@@ -370,30 +394,22 @@ function analyze(
     }
   }
 
-  // ── destination inbound NSG check ──
+  // ── destination inbound: 서브넷 NSG → NIC NSG (Azure 평가 순서) ──
   if (dstVm) {
-    const dstNsgs = getVmNsgs(dstVm);
-    if (dstNsgs.length === 0) {
-      hops.push({
-        layer: "NSG (수신측)",
-        resource: `${dstVm.name} — NSG 없음`,
-        direction: "Inbound",
-        result: "NoNSG",
-        note: "NSG가 연결되지 않아 기본 Azure 정책 적용",
-      });
+    const dstSubnetId = getVmSubnetId(dstVm, all);
+    const dstNicNsg = getNicNsg(dstVm);
+    const dstSubnetNsg = dstSubnetId ? getSubnetNsg(dstSubnetId, all) : null;
+
+    if (!dstNicNsg && !dstSubnetNsg) {
+      hops.push({ layer: "NSG (수신측 NIC)", resource: `${dstVm.name} — NSG 없음`, direction: "Inbound", result: "NoNSG", note: "NIC/서브넷 모두 NSG 없음" });
     } else {
-      for (const { nsg, nic } of dstNsgs) {
-        const rules = getNsgRules(nsg);
-        const match = evaluateNsg(rules, "Inbound", srcIp, dstIp, port, proto);
-        hops.push({
-          layer: "NSG (수신측)",
-          resource: `${nsg.name} (NIC: ${nic.name})`,
-          direction: "Inbound",
-          result: match ? match.access : "Allow",
-          matchedRule: match?.rule,
-          note: match ? undefined : "매칭 규칙 없음 — 기본 허용",
-        });
-        if (match?.access === "Deny") break;
+      let dstDenied = false;
+      if (dstSubnetNsg) {
+        const r = pushNsgHop("NSG (수신측 서브넷)", dstSubnetNsg.name, "Inbound", dstSubnetNsg);
+        if (r === "Deny") dstDenied = true;
+      }
+      if (!dstDenied && dstNicNsg) {
+        pushNsgHop("NSG (수신측 NIC)", `${dstNicNsg.nsg.name} (NIC: ${dstNicNsg.nic.name})`, "Inbound", dstNicNsg.nsg);
       }
     }
   }
@@ -441,6 +457,7 @@ export default function NetworkAnalysis() {
   const [port, setPort] = useState("80");
   const [proto, setProto] = useState("Tcp");
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     api.get<Resource[]>("/resources").then((r) => setResources(r.data));
@@ -456,25 +473,30 @@ export default function NetworkAnalysis() {
     [resources]
   );
 
-  function getVmIp(vm: Resource): string {
-    const props = vm.properties || {};
-    const nicIds: string[] = (props.networkProfile?.networkInterfaces || []).map((n: any) =>
+  function getVmIp(vm: Resource, all: Resource[]): string {
+    const nicIds: string[] = (vm.properties?.networkProfile?.networkInterfaces || []).map((n: any) =>
       (n.id || "").toLowerCase()
     );
-    const nic = resources.find((r) => nicIds.includes(r.id.toLowerCase()));
+    const nic = all.find((r) => nicIds.includes(r.id.toLowerCase()));
     if (!nic) return vm.public_ip_address || "";
-    const ipCfgs = nic.properties?.ipConfigurations || [];
-    return ipCfgs[0]?.properties?.privateIPAddress || vm.public_ip_address || "";
+    return nic.properties?.ipConfigurations?.[0]?.properties?.privateIPAddress || vm.public_ip_address || "";
   }
 
-  function run() {
-    const srcVm = srcMode === "vm" ? vms.find((v) => v.id === srcVmId) || null : null;
-    const dstVm = dstMode === "vm" ? vms.find((v) => v.id === dstVmId) || null : null;
-    const srcIp = srcMode === "vm" && srcVm ? getVmIp(srcVm) : srcIpInput;
-    const dstIp = dstMode === "vm" && dstVm ? getVmIp(dstVm) : dstIpInput;
+  async function run() {
+    setLoading(true);
+    // 분석 실행 시 최신 리소스 fetch (포탈 변경사항 즉시 반영)
+    const fresh = await api.get<Resource[]>("/resources").then((r) => r.data);
+    setResources(fresh);
+
+    const freshVms = fresh.filter((r) => r.type === "microsoft.compute/virtualmachines");
+    const srcVm = srcMode === "vm" ? freshVms.find((v) => v.id === srcVmId) || null : null;
+    const dstVm = dstMode === "vm" ? freshVms.find((v) => v.id === dstVmId) || null : null;
+    const srcIp = srcMode === "vm" && srcVm ? getVmIp(srcVm, fresh) : srcIpInput;
+    const dstIp = dstMode === "vm" && dstVm ? getVmIp(dstVm, fresh) : dstIpInput;
     const portNum = parseInt(port, 10);
-    if (!srcIp || !dstIp || isNaN(portNum)) return;
-    setResult(analyze(srcVm, srcIp, dstVm, dstIp, portNum, proto, resources));
+    if (!srcIp || !dstIp || isNaN(portNum)) { setLoading(false); return; }
+    setResult(analyze(srcVm, srcIp, dstVm, dstIp, portNum, proto, fresh));
+    setLoading(false);
   }
 
   const inputSt: React.CSSProperties = {
@@ -501,7 +523,7 @@ export default function NetworkAnalysis() {
             {srcMode === "vm" ? (
               <select value={srcVmId} onChange={(e) => setSrcVmId(e.target.value)} style={selectSt}>
                 <option value="">VM 선택</option>
-                {vms.map((v) => <option key={v.id} value={v.id}>{v.name} ({getVmIp(v) || "IP 없음"})</option>)}
+                {vms.map((v) => <option key={v.id} value={v.id}>{v.name} ({getVmIp(v, resources) || "IP 없음"})</option>)}
               </select>
             ) : (
               <input value={srcIpInput} onChange={(e) => setSrcIpInput(e.target.value)} placeholder="예: 10.0.0.4" style={inputSt} />
@@ -518,7 +540,7 @@ export default function NetworkAnalysis() {
             {dstMode === "vm" ? (
               <select value={dstVmId} onChange={(e) => setDstVmId(e.target.value)} style={selectSt}>
                 <option value="">VM 선택</option>
-                {vms.map((v) => <option key={v.id} value={v.id}>{v.name} ({getVmIp(v) || "IP 없음"})</option>)}
+                {vms.map((v) => <option key={v.id} value={v.id}>{v.name} ({getVmIp(v, resources) || "IP 없음"})</option>)}
               </select>
             ) : (
               <input value={dstIpInput} onChange={(e) => setDstIpInput(e.target.value)} placeholder="예: 10.0.0.5 또는 외부 IP" style={inputSt} />
@@ -541,9 +563,10 @@ export default function NetworkAnalysis() {
           </div>
           <button
             onClick={run}
-            style={{ padding: "9px 28px", background: "#3182ce", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 14, fontWeight: 600, whiteSpace: "nowrap" }}
+            disabled={loading}
+            style={{ padding: "9px 28px", background: loading ? "#90cdf4" : "#3182ce", color: "#fff", border: "none", borderRadius: 6, cursor: loading ? "not-allowed" : "pointer", fontSize: 14, fontWeight: 600, whiteSpace: "nowrap" }}
           >
-            분석 실행
+            {loading ? "분석 중..." : "분석 실행"}
           </button>
         </div>
       </div>
